@@ -1,4 +1,4 @@
-package exercise
+package session1
 
 import "sort"
 
