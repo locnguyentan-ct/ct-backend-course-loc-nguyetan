@@ -17,7 +17,9 @@ func main() {
 	//sessionCode1()
 
 	// Session2
-	sessionCode2()
+	//sessionCode2()
+
+	// Session 3
 
 }
 

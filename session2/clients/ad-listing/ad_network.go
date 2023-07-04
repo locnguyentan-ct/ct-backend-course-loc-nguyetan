@@ -4,7 +4,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 )
+
+/*
+
+ */
 
 const (
 	BaseUrl = "https://gateway.chotot.com/v1/public/ad-listing"
@@ -44,7 +49,9 @@ func WithLoggerToFile(filename string) ClientOption {
 
 func NewClient(baseUrl string, options ...ClientOption) *client {
 	c := &client{
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{
+			Timeout: 5 * time.Second,
+		},
 		baseUrl:    baseUrl,
 		retryTimes: 3,
 		logger:     nil,
