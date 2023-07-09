@@ -49,3 +49,4 @@ type UserInfo struct {
 }
 
 var ErrUserNotFound = errors.New("user not found")
+var ErrUserExisted = errors.New("user existed")

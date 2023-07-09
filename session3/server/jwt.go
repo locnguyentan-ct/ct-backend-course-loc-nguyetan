@@ -69,7 +69,7 @@ func ValidateToken(tokenString string) (string, error) {
 		}
 
 		// Return the secret key used for signing
-		return []byte("your-secret-key"), nil
+		return []byte("ct-secret-key"), nil
 	})
 	if err != nil {
 		return "", err

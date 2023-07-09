@@ -1,21 +1,76 @@
 package main
 
 import (
+	"github.com/go-playground/validator/v10"
+	"github.com/labstack/echo"
+	"github.com/labstack/echo/middleware"
 	"net/http"
 	"time"
 )
 
 func main() {
-	http.HandleFunc("/api/public/register", register)
-	http.HandleFunc("/api/public/login", login)
-	http.HandleFunc("/api/private/self", self)
+	e := echo.New()
 
-	http.HandleFunc("/api/public/log/register", LogWrapper(register))
-	http.HandleFunc("/api/public/log/login", LogWrapper(login))
-	http.HandleFunc("/api/private/log/self", LogWrapper(self))
+	// Middleware
+	e.Use(middleware.Logger())
+	e.Use(middleware.Recover())
+	//e.Use(authMiddleware)
+	e.Use(LogMiddleware)
 
-	http.ListenAndServe(":8090", nil)
+	// Routes
+	e.POST("/api/public/register", register)
+	e.POST("/api/public/login", login)
+	e.GET("/api/private/self", self, middleware.JWT([]byte("ct-secret-key")), authMiddleware)
+
+	// Start server
+	err := e.Start(":8090")
+	if err != nil {
+		return
+	}
 }
+
+func authMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		authHeader := c.Request().Header.Get("Authorization")
+
+		// Extract the JWT token from the Authorization header
+		token, err := ExtractTokenFromHeader(authHeader)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusUnauthorized, "Invalid token")
+		}
+
+		// Validate the JWT token
+		username, err := ValidateToken(token)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusUnauthorized, "Invalid token")
+		}
+
+		// Store the username in the context for further use if needed
+		c.Set("username", username)
+
+		// Call the next handler
+		return next(c)
+	}
+}
+
+/*
+	httpRequest -> BYTE -> Binding(JSON -> Struct) -> Validate -> Handle Logic -> (Struct -> JSON) -> BYTE -> httpResponse
+
+	Framework: GO Practical (lib, wrapper)
+
+	Echo (simple, easy to use) & Gin (interface more complex)
+	-> Echo
+*/
+
+/*
+	PATH : Handler
+	Common prefix:
+		api/public
+		api/private (Middle authentication)
+	Grouping => implement Middle
+
+	* Middleware: Authentication, Logging, Recover (handler unexpected error)
+*/
 
 /*
 		TODO #2:
@@ -23,32 +78,42 @@ func main() {
 	  	- Validate username (not empty and unique)
 	  	- Validate password (length should at least 8)
 */
-func register(w http.ResponseWriter, r *http.Request) {
-	var req RegisterRequest
+func register(c echo.Context) error {
+	req := new(RegisterRequest)
 
-	if err := ParseJSONBody(r, &req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
+	if err := c.Bind(req); err != nil {
+		return c.JSON(http.StatusBadRequest, "Invalid request body")
 	}
 
-	if req.Username == "" {
-		http.Error(w, "Username is required", http.StatusBadRequest)
-		return
-	}
+	validate := validator.New()
+	if err := validate.Struct(req); err != nil {
+		if _, ok := err.(*validator.InvalidValidationError); ok {
+			return c.JSON(http.StatusInternalServerError, "Failed to validate the request")
+		}
 
-	// Validate username uniqueness (assuming userStore is a global variable)
-	_, err := userStore.Get(req.Username)
-	if err == nil {
-		http.Error(w, "Username already exists", http.StatusBadRequest)
-		return
-	} else if err != ErrUserNotFound {
-		http.Error(w, "Failed to check username availability", http.StatusInternalServerError)
-		return
-	}
+		//var validationErrors []string
 
-	if len(req.Password) < 8 {
-		http.Error(w, "Password should be at least 8 characters long", http.StatusBadRequest)
-		return
+		for _, err := range err.(validator.ValidationErrors) {
+			switch err.StructField() {
+			case "Username":
+				//validationErrors = append(validationErrors, "Username is required")
+				return c.JSON(http.StatusBadRequest, "Username is required")
+			case "Password":
+				// If user is not existed, show error validate
+				//validationErrors = append(validationErrors, "Password should be at least 8 characters long")
+				return c.JSON(http.StatusBadRequest, "Password should be at least 8 characters long")
+			default:
+				// Validate unique Username
+				_, err := userStore.Get(req.Username)
+				if err == nil {
+					return c.JSON(http.StatusBadRequest, "Username is existed")
+				} else if err != ErrUserNotFound {
+					return c.JSON(http.StatusInternalServerError, "Failed to check username availability")
+				}
+			}
+		}
+
+		//return c.JSON(http.StatusInternalServerError, validationErrors)
 	}
 
 	info := UserInfo{
@@ -59,19 +124,14 @@ func register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := userStore.Save(info); err != nil {
-		http.Error(w, "Failed to save user", http.StatusInternalServerError)
-		return
+		//http.Error(w, "Failed to save user", http.StatusInternalServerError)
+		//return
+		return c.JSON(http.StatusInternalServerError, "Failed to save user")
 	}
 
-	w.WriteHeader(http.StatusOK)
-	return
-}
-
-type RegisterRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	FullName string `json:"full_name"`
-	Address  string `json:"address"`
+	//w.WriteHeader(http.StatusOK)
+	//return
+	return c.JSON(http.StatusOK, "Registration successful")
 }
 
 /*
@@ -80,48 +140,50 @@ type RegisterRequest struct {
 		- validate the user's credentials (username, password)
 	  	- Return JWT token to client
 */
-func login(w http.ResponseWriter, r *http.Request) {
-	var req LoginRequest
+func login(c echo.Context) error {
+	req := new(LoginRequest)
 
-	if err := ParseJSONBody(r, &req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, "Invalid request body")
 	}
 
-	if req.Username == "" || req.Password == "" {
-		http.Error(w, "Username and password are required", http.StatusBadRequest)
-		return
-	}
+	validate := validator.New()
+	if err := validate.Struct(req); err != nil {
+		if _, ok := err.(*validator.InvalidValidationError); ok {
+			return c.JSON(http.StatusInternalServerError, "Failed to validate the request")
+		}
 
-	user, err := userStore.Get(req.Username)
-	if err != nil {
-		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
-		return
-	}
+		for _, err := range err.(validator.ValidationErrors) {
+			switch err.StructField() {
+			case "Username":
+				//validationErrors = append(validationErrors, "Username is required")
+				return c.JSON(http.StatusBadRequest, "Username are required")
+			case "Password":
+				// If user is not existed, show error validate
+				//validationErrors = append(validationErrors, "Password should be at least 8 characters long")
+				return c.JSON(http.StatusBadRequest, "Password are required")
+			default:
+				// Validate unique Username
+				user, err := userStore.Get(req.Username)
+				if err != nil {
+					return c.JSON(http.StatusUnauthorized, "Invalid username or password")
+				}
 
-	if user.Password != req.Password {
-		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
-		return
+				if user.Password != req.Password {
+					return c.JSON(http.StatusUnauthorized, "Invalid username or password")
+				}
+			}
+		}
 	}
 
 	token, err := GenerateToken(req.Username, 24*time.Hour)
 	if err != nil {
-		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
-		return
+		return c.JSON(http.StatusInternalServerError, "Failed to generate token")
 	}
 
 	resp := LoginResponse{Token: token}
 
-	WriteJSONResponse(w, resp, http.StatusOK)
-}
-
-type LoginRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
-type LoginResponse struct {
-	Token string `json:"token"`
+	return c.JSON(http.StatusOK, resp)
 }
 
 /*
@@ -131,60 +193,32 @@ TODO #4:
 - Validate Token
 - Return user info`
 */
-func self(w http.ResponseWriter, r *http.Request) {
-	authHeader := r.Header.Get("Authorization")
-
-	// Extract the JWT token from the Authorization header
-	token, err := ExtractTokenFromHeader(authHeader)
-	if err != nil {
-		http.Error(w, "Invalid token", http.StatusUnauthorized)
-		return
-	}
-
-	// Validate the JWT token
-	username, err := ValidateToken(token)
-	if err != nil {
-		http.Error(w, "Invalid token", http.StatusUnauthorized)
-		return
-	}
+func self(c echo.Context) error {
+	// Retrieve the username from the context
+	username := c.Get("username").(string)
 
 	// Retrieve user information from userStore
 	user, err := userStore.Get(username)
 	if err != nil {
-		http.Error(w, "User not found", http.StatusUnauthorized)
-		return
+		return echo.NewHTTPError(http.StatusUnauthorized, "User not found")
 	}
 
 	// Return the user information as JSON
-	WriteJSONResponse(w, user, http.StatusOK)
+	return c.JSON(http.StatusOK, user)
 }
 
-/*
-TODO: extra wrapper
-Print some logs to console
-  - Path
-  - Http Status code
-  - Time start, Duration
-*/
-func LogWrapper(handler http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func LogMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
 		startTime := time.Now()
 
-		// Call the original handler
-		handler(w, r)
+		// Call the next handler
+		err := next(c)
 
 		// Log the request information
 		duration := time.Since(startTime)
-		log := "Path: " + r.URL.Path + " | Status Code: " + http.StatusText(http.StatusOK) + " | Time Start: " + startTime.String() + " | Duration: " + duration.String()
-		println(log)
+		log := "Path: " + c.Request().URL.Path + " | Status Code: " + http.StatusText(c.Response().Status) + " | Time Start: " + startTime.String() + " | Duration: " + duration.String()
+		c.Logger().Info(log)
+
+		return err
 	}
 }
-
-/*
-	TODO #1: implement in-memory user store
-	TODO #2: implement register handler
-	TODO #3: implement login handler
-	TODO #4: implement self handler
-
-	Extra: implement log handler
-*/
